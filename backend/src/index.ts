@@ -5,6 +5,7 @@ import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -15,6 +16,13 @@ const PORT = process.env.PORT || 3001;
 const uploadsDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Security: Validate that a file path is within the uploads directory
+function isPathSafe(filePath: string): boolean {
+  const resolvedPath = path.resolve(filePath);
+  const resolvedUploadsDir = path.resolve(uploadsDir);
+  return resolvedPath.startsWith(resolvedUploadsDir);
 }
 
 const storage = multer.diskStorage({
@@ -37,10 +45,28 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+// Rate limiting to prevent abuse
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Too many requests from this IP, please try again later.'
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 50, // Limit uploads to 50 per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Too many uploads from this IP, please try again later.'
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
+app.use('/api/', apiLimiter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -48,7 +74,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Image upload endpoint
-app.post('/api/upload-image', upload.single('image'), async (req, res) => {
+app.post('/api/upload-image', uploadLimiter, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image file provided' });
@@ -68,10 +94,15 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
 });
 
 // Voice transcription endpoint
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+app.post('/api/transcribe', uploadLimiter, upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file provided' });
+    }
+
+    // Validate file path for security
+    if (!isPathSafe(req.file.path)) {
+      return res.status(400).json({ error: 'Invalid file path' });
     }
 
     const { context } = req.body;
@@ -102,8 +133,11 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     console.error('Error transcribing audio:', error);
     
     // Clean up file on error
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+    if (req.file) {
+      const filePath = req.file.path;
+      if (isPathSafe(filePath) && fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     }
 
     res.status(500).json({ 
@@ -114,7 +148,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
 });
 
 // Combined endpoint for marking with transcription
-app.post('/api/mark-and-transcribe', upload.fields([
+app.post('/api/mark-and-transcribe', uploadLimiter, upload.fields([
   { name: 'audio', maxCount: 1 }
 ]), async (req, res) => {
   try {
@@ -125,6 +159,12 @@ app.post('/api/mark-and-transcribe', upload.fields([
     }
 
     const audioFile = files.audio[0];
+    
+    // Validate file path for security
+    if (!isPathSafe(audioFile.path)) {
+      return res.status(400).json({ error: 'Invalid file path' });
+    }
+
     const { markData, context } = req.body;
 
     // Parse marking data (coordinates, type of mark, etc.)
@@ -164,8 +204,11 @@ app.post('/api/mark-and-transcribe', upload.fields([
     
     // Clean up files on error
     const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-    if (files && files.audio && files.audio[0] && fs.existsSync(files.audio[0].path)) {
-      fs.unlinkSync(files.audio[0].path);
+    if (files && files.audio && files.audio[0]) {
+      const audioPath = files.audio[0].path;
+      if (isPathSafe(audioPath) && fs.existsSync(audioPath)) {
+        fs.unlinkSync(audioPath);
+      }
     }
 
     res.status(500).json({ 
