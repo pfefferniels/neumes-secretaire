@@ -9,3 +9,8 @@ uploads/
 *.tsbuildinfo
 .vscode/
 .idea/
+examples/*.jpg
+examples/*.png
+examples/*.jpeg
+examples/*.gif
+examples/*.webp
